@@ -1,8 +1,12 @@
+use std::ffi::OsStr;
+use std::path::Path;
+use std::thread;
+use std::time::Duration;
 use nvml_wrapper::Nvml;
 use nvml_wrapper::enum_wrappers;
 use reqwest::Client;
 
-use sysinfo::{CpuRefreshKind, Disks, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, DiskKind, Disks, RefreshKind, System};
 use tokio::runtime::Runtime;
 
 use serde::{Deserialize, Serialize};
@@ -135,7 +139,6 @@ struct GpuInfo {
 
 fn get_gpu_info() -> Result<GpuInfo, nvml_wrapper::error::NvmlError> {
     let nvml = Nvml::init()?;
-
     let device = nvml.device_by_index(0)?;
     let power_limit = device.enforced_power_limit()?;
     let memory_info = device.memory_info()?;
@@ -161,6 +164,105 @@ fn get_gpu_info() -> Result<GpuInfo, nvml_wrapper::error::NvmlError> {
     })
 }
 
+#[derive(Debug)]
+struct SystemInfo {
+    total_memory: f64,
+    used_memory: f64,
+    total_swap: f64,
+    used_swap: f64,
+    system_name: Option<String>,
+    kernel_version: Option<String>,
+    os_version: Option<String>,
+    host_name: Option<String>,
+    uptime: u64,
+    disks: Vec<DiskInfo>,
+    average_cpu_usage: f32,
+}
+
+#[derive(Debug)]
+struct DiskInfo {
+    name: String,
+    kind: DiskKind,
+    file_system: String,
+    mount_point: String,
+    total_space: f64,
+    available_space: f64,
+}
+
+fn get_system_info() -> SystemInfo {
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let total_memory = bytes_to_gb(sys.total_memory());
+    let used_memory = bytes_to_gb(sys.used_memory());
+    let total_swap = bytes_to_gb(sys.total_swap());
+    let used_swap = bytes_to_gb(sys.used_swap());
+
+    let system_name = System::name();
+    let kernel_version = System::kernel_version();
+    let os_version = System::os_version();
+    let host_name = System::host_name();
+
+    let uptime = System::uptime();
+    let disks = get_disk_info();
+
+    let mut s = System::new_with_specifics(RefreshKind::new().with_cpu(CpuRefreshKind::everything()));
+
+    thread::sleep(Duration::from_secs(1));
+    s.refresh_cpu();
+
+    let mut total_cpu_usage = 0.0;
+    for cpu in s.cpus() {
+        total_cpu_usage += cpu.cpu_usage();
+    }
+    let average_cpu_usage = if !s.cpus().is_empty() {
+        total_cpu_usage / s.cpus().len() as f32
+    } else {
+        0.0
+    };
+
+    SystemInfo {
+        total_memory,
+        used_memory,
+        total_swap,
+        used_swap,
+        system_name,
+        kernel_version,
+        os_version,
+        host_name,
+        uptime,
+        disks,
+        average_cpu_usage,
+    }
+}
+
+fn os_str_to_option_string(os_str: Option<&OsStr>) -> Option<String> {
+    os_str.map(|s| s.to_string_lossy().into_owned())
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn get_disk_info() -> Vec<DiskInfo> {
+    let mut disk_info_list: Vec<DiskInfo> = Vec::new();
+
+    let disks = Disks::new_with_refreshed_list();
+    for disk in disks.list() {
+        let disk_info = DiskInfo {
+            name: os_str_to_option_string(Option::from(disk.name())).unwrap(),
+            kind: Option::from(disk.kind()).unwrap(),
+            file_system: os_str_to_option_string(Option::from(disk.file_system())).unwrap(),
+            mount_point: path_to_string(disk.mount_point()).into(),
+            total_space: bytes_to_gb(disk.total_space()),
+            available_space: bytes_to_gb(disk.available_space()),
+        };
+        disk_info_list.push(disk_info);
+    }
+
+    disk_info_list
+}
+
 fn main() {
     match get_gpu_info() {
         Ok(gpu_info) => {
@@ -178,65 +280,34 @@ fn main() {
         Err(e) => println!("Error: {}", e),
     }
 
-    // Please note that we use "new_all" to ensure that all list of
-// components, network interfaces, disks and users are already
-// filled!
-    let mut sys = System::new_all();
-
-// First we update all information of our `System` struct.
-    sys.refresh_all();
+    let system_info = get_system_info();
 
     println!("=> system:");
-// RAM and swap information:
-    println!("total memory: {:.2} GB", bytes_to_gb(sys.total_memory()));
-    println!("used memory : {:.2} GB", bytes_to_gb(sys.used_memory()));
-    println!("total swap  : {:.2} GB", bytes_to_gb(sys.total_swap()));
-    println!("used swap   : {:.2} GB", bytes_to_gb(sys.used_swap()));
+    println!("Total Memory: {:.2} GB", system_info.total_memory);
+    println!("Used Memory: {:.2} GB", system_info.used_memory);
+    println!("Total Swap: {:.2} GB", system_info.total_swap);
+    println!("Used Swap: {:.2} GB", system_info.used_swap);
+    println!("System Name: {:?}", system_info.system_name);
+    println!("Kernel Version: {:?}", system_info.kernel_version);
+    println!("OS Version: {:?}", system_info.os_version);
+    println!("Host Name: {:?}", system_info.host_name);
+    let (days, hours, minutes, remaining_seconds) = convert_seconds(system_info.uptime);
+    println!("Uptime {} seconds is equivalent to {} days, {} hours, {} minutes, and {} seconds", System::uptime(), days, hours, minutes, remaining_seconds);
+    println!("Average CPU Usage: {:.2}%", system_info.average_cpu_usage);
 
-// Display system information:
-    println!("System name:             {:?}", System::name());
-    println!("System kernel version:   {:?}", System::kernel_version());
-    println!("System OS version:       {:?}", System::os_version());
-    println!("System host name:        {:?}", System::host_name());
-    let (days, hours, minutes, remaining_seconds) = convert_seconds(System::uptime());
-
-    println!("uptime {} seconds is equivalent to {} days, {} hours, {} minutes, and {} seconds", System::uptime(), days, hours, minutes, remaining_seconds);
-// Number of CPUs:
-    println!("NB CPUs: {}", sys.cpus().len());
-
-// We display all disks' information:
     println!("=> disks:");
-    let disks = Disks::new_with_refreshed_list();
-    for disk in disks.list() {
-        print!("{:?}\t{:?}\t{:?}\t{:?}", disk.name(), disk.kind(), disk.file_system(), disk.mount_point());
-        println!("\t{:.2} GB\t{:.2} GB", bytes_to_gb(disk.total_space()), bytes_to_gb(disk.available_space()));
+    for disk in system_info.disks {
+        println!(
+            "{:?}\t{:?}\t{:?}\t{:?}\t{:.2} GB\t{:.2} GB",
+            disk.name,
+            disk.kind,
+            disk.file_system,
+            disk.mount_point,
+            disk.total_space,
+            disk.available_space
+        );
     }
 
-    let mut s = System::new_with_specifics(
-        RefreshKind::new().with_cpu(CpuRefreshKind::everything()),
-    );
-
-// Wait a bit because CPU usage is based on diff.
-    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-// Refresh CPUs again.
-    s.refresh_cpu();
-
-    // 计算 CPU 使用率的平均值
-    let mut total_cpu_usage = 0.0;
-
-    for cpu in s.cpus() {
-        println!("{} Usage: {}%", cpu.name(), cpu.cpu_usage());
-        // 累加 CPU 使用率
-        total_cpu_usage += cpu.cpu_usage();
-    }
-
-    // 计算平均值
-    let average_cpu_usage = if !s.cpus().is_empty() {
-        total_cpu_usage / s.cpus().len() as f32
-    } else {
-        0.0
-    };
-    println!("average_cpu_usage {}%", average_cpu_usage);
 
     let mut rtt =  Runtime::new().unwrap();
     rtt.block_on(async {
