@@ -1,0 +1,15 @@
+[package]
+name = "rust-systemDetails"
+version = "0.1.0"
+edition = "2021"
+authors = ["Chao Wu", "Chao Wu <hxace@foxmail.com>"]
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+nvml-wrapper = "0.10.0"
+sysinfo = "0.30.5"
+reqwest = "0.11.24"
+tokio = { version = "1.36.0", features = ["full"] }
+serde = { version = "1.0.197", features = ["derive"] }
+serde_json = "1.0.108"
